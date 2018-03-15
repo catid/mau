@@ -1,0 +1,34 @@
+# Compiled Object files
+*.slo
+*.lo
+*.o
+
+# Compiled Dynamic libraries
+*.so
+*.dylib
+*.dll
+*.lib
+*.exp
+*.ilk
+
+# Compiled Static libraries
+*.lai
+*.la
+*.a
+*.opendb
+*.VC.db
+*.suo
+*.ipch
+*.obj
+*.log
+*.tlog
+*.idb
+*.pdb
+*.db
+*.iobj
+*.ipdb
+
+*.vspx
+
+# Doxygen
+docs/
