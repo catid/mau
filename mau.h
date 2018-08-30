@@ -168,18 +168,35 @@ typedef struct MauChannelConfig_t
     float LossRate = 0.01f; ///< [0, 1]
 
     /// After a loss occurs, this is the probability that a packet makes it through
-    float DeliveryRate = 1.f; ///< [0, 1]
+    float DeliveryRate = 0.5f; ///< [0, 1]
 
     /// Router knobs:
 
     /// Router throughput in MBPS
-    float Router_MBPS = 100.f; ///< MBPS
+    float Router_MBPS = 1.f; ///< MBPS
 
-    /// Depth of router queue in KB
-    unsigned Router_QueueKB = 2000; ///< kilobytes
+    /// Depth of router queue in milliseconds
+    unsigned Router_QueueMsec = 100; ///< milliseconds
 
-    /// Random Early Detection mode
-    bool EnableRED = true;
+    /// Is Random Early Detection (RED) enabled?
+    bool Router_RED_Enable = true;
+
+    /**
+        Add random packet drops beyond some depth.
+        Loss rate will be rescaled after this fraction.
+
+        Example:
+
+        Router_RED_QueueFraction = 0.6
+        Queue depth = 0.7
+
+        RED loss rate = (0.7 - 0.6) / (1.0 - 0.6) = 40%
+        RED loss rate = (0.9 - 0.6) / (1.0 - 0.6) = 75%
+    */
+    float Router_RED_QueueFraction = 0.5f; ///< fraction
+
+    ///< Maximum packet loss rate (PLR) to impose
+    float Router_RED_MaxPLR = 0.02f; /// loss rate
 
     /// Latency knobs:
 
@@ -195,12 +212,12 @@ typedef struct MauChannelConfig_t
     uint32_t ReorderMaximumLatencyMsec = 150; ///< in milliseconds
 
     /// Re-order rate (uniform dist), adding variable extra delay to packets
-    float ReorderRate = 0.f; ///< [0, 1]
+    float ReorderRate = 0.005f; ///< [0, 1]
 
     /// Decaying rate at which the next packet will have the same extra delay
     /// After reorder of packet N, reorder rate for N+1, N+2, ... = DR.
     /// Until a packet is not reordered and then reorder rate is normal again.
-    float OrderRate = 1.f; ///< [0, 1]
+    float OrderRate = 0.3f; ///< [0, 1]
 
     /// Tampering knobs:
 

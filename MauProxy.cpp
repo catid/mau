@@ -35,6 +35,53 @@ static logger::Channel ModuleLogger("Proxy", MinimumLogLevel);
 
 
 //------------------------------------------------------------------------------
+// PacketQueue
+
+void PacketQueue::InsertSorted(QueueNode* node)
+{
+    const uint64_t deliveryUsec = node->DeliveryUsec;
+
+    QueueNode* next = nullptr;
+
+    // Insert at front or middle (based on target delivery time):
+    for (QueueNode* prev = Tail; prev; next = prev, prev = prev->Prev)
+    {
+        // If we should insert after prev:
+        if (deliveryUsec >= prev->DeliveryUsec)
+        {
+            if (prev) {
+                prev->Next = node;
+            }
+            else {
+                Head = node;
+            }
+            if (next) {
+                next->Prev = node;
+            }
+            else {
+                Tail = node;
+            }
+            node->Next = next;
+            node->Prev = prev;
+
+            return;
+        }
+    }
+
+    // Insert at the front:
+    Head = node;
+    if (next) {
+        next->Prev = node;
+    }
+    else {
+        Tail = node;
+    }
+    node->Next = next;
+    node->Prev = nullptr;
+}
+
+
+//------------------------------------------------------------------------------
 // DeliveryChannel
 
 bool DeliveryChannel::Initialize(DeliveryCommonData* common)
@@ -70,18 +117,73 @@ void DeliveryChannel::SetDeliveryAddress(const UDPAddress& addr)
 
 void DeliveryChannel::InsertQueueNode(QueueNode* node)
 {
-    MauChannelConfig config = Common->ChannelConfig.Get();
+    /*
+        Client <-> Internet Delay <-> ISP Router Queue <-> Server
 
+        Most queues are going to be on the receiver ISP side, for example
+        on the cellphone network or cable ISP.  The Internet transmission
+        delay comes before that.  Since this is the most common case for
+        the protocols we are testing, we use the simplified model above.
+
+        In this model, packets put into the queue are subjected to:
+        (1) Internet Delay
+        (2) ISP Router Queue
+
+        The Internet Delay may vary on route changes.
+
+        The Internet Service Provider (ISP) Router Queue causes
+        delays and packet loss if the queue is too full.
+    */
+
+    MauChannelConfig config = Common->ChannelConfig.Get();
     bool dupe = false;
 
+    // Hold InsertLock while processing insert
     {
-        std::lock_guard<std::mutex> locker(DeliveryLock);
+        Locker locker(InsertLock);
 
+        const uint64_t nowUsec = GetTimeUsec();
+
+        const unsigned routerQueueUsec = config.Router_QueueMsec * 1000;
+        const uint64_t routerQueueStartUsec = nowUsec + config.LightSpeedMsec * 1000;
+        const unsigned dataDelayUsec = (unsigned)(node->Bytes / config.Router_MBPS);
+
+        uint64_t deliveryUsec = 0;
+        float queueFraction = 0.f;
+
+        // Calculate delivery time based on router queue
+        if (NextQueueSlotUsec < routerQueueStartUsec) {
+            deliveryUsec = routerQueueStartUsec + dataDelayUsec;
+        }
+        else {
+            deliveryUsec = NextQueueSlotUsec + dataDelayUsec;
+
+            // DropTail if packet does not fit in router queue
+            if (deliveryUsec >= routerQueueStartUsec + routerQueueUsec) {
+                Common->ReadBufferAllocator.Free(node);
+                return;
+            }
+
+            queueFraction = (deliveryUsec - routerQueueStartUsec) / (float)routerQueueUsec;
+        }
+
+        // If RED is triggered:
+        if (config.Router_RED_QueueFraction != 0.f && queueFraction > config.Router_RED_QueueFraction)
+        {
+            // Rescale:
+            const float red_plr = config.Router_RED_MaxPLR * (queueFraction - config.Router_RED_QueueFraction) / (1.f - config.Router_RED_QueueFraction);
+
+            // If RED drop is needed:
+            if (LossRNG.Next() < (uint32_t)(0xffffffff * red_plr)) {
+                Common->ReadBufferAllocator.Free(node);
+                return;
+            }
+        }
+
+        // If duplicating:
         if (LossRNG.Next() < (uint32_t)(0xffffffff * config.DuplicateRate)) {
             dupe = true;
         }
-
-        uint32_t delayMsec = config.LightSpeedMsec;
 
         float reorderRate;
         if (InBurstReorder) {
@@ -98,31 +200,15 @@ void DeliveryChannel::InsertQueueNode(QueueNode* node)
             InBurstReorder = true;
             reorderMsec = config.ReorderMinimumLatencyMsec;
             const unsigned range = config.ReorderMaximumLatencyMsec - config.ReorderMinimumLatencyMsec;
-            reorderMsec += LossRNG.Next() % range;
+            if (range > 0) {
+                reorderMsec += LossRNG.Next() % range;
+            }
         }
         else {
             InBurstReorder = false;
         }
 
-        // FIXME: Implement RouterQueue
-        const uint64_t nowUsec = GetTimeUsec();
-        uint64_t deliveryUsec = nowUsec + (delayMsec + reorderMsec) * 1000; // 100 ms delay
-
-        const uint64_t dataDelayUsec = (uint32_t)(node->Bytes / config.Router_MBPS);
-
-        if (reorderMsec <= 0)
-        {
-            if (deliveryUsec < NextSendUsec) {
-                deliveryUsec = NextSendUsec;
-            }
-
-            deliveryUsec += dataDelayUsec;
-
-            NextSendUsec = deliveryUsec;
-        }
-
-        node->TargetDeliveryUsec = deliveryUsec;
-
+        // Select loss rate for this packet due to Gilbert-Elliott channel model
         float lossRate;
         if (InBurstLoss) {
             lossRate = 1.f - config.DeliveryRate;
@@ -134,18 +220,34 @@ void DeliveryChannel::InsertQueueNode(QueueNode* node)
         // If this packet will be lost:
         if (LossRNG.Next() < (uint32_t)(0xffffffff * lossRate)) {
             InBurstLoss = true;
+            Common->ReadBufferAllocator.Free(node);
+            return;
         }
-        else
-        {
-            InBurstLoss = false;
+        InBurstLoss = false; // Burst loss is done
 
-            // If this packet will be corrupted:
-            if (LossRNG.Next() < (uint32_t)(0xffffffff * config.CorruptionRate)) {
-                node->Data[LossRNG.Next() % node->Bytes] ^= 8;
-            }
-
-            DeliveryQueue.InsertSorted(node);
+        // If this packet will be corrupted:
+        if (LossRNG.Next() < (uint32_t)(0xffffffff * config.CorruptionRate)) {
+            node->Data[LossRNG.Next() % node->Bytes] ^= 8;
         }
+
+        // If re-ordered:
+        if (reorderMsec > 0) {
+            // Add reorder time to it
+            // Note: Bypasses queue so will not be counted towards channel bandwidth
+            deliveryUsec += reorderMsec * 1000;
+        }
+        else {
+            // It takes up a queue slot, so advance the queue
+            NextQueueSlotUsec = deliveryUsec;
+        }
+
+        node->DeliveryUsec = deliveryUsec;
+    }
+
+    // Hold QueueLock during queue insert
+    {
+        Locker locker(QueueLock);
+        Queue.InsertSorted(node);
     }
 
     if (dupe)
@@ -170,16 +272,16 @@ void DeliveryChannel::postNextTimer()
     uint64_t nextTimerWakeUsec = 0;
 
     {
-        std::lock_guard<std::mutex> locker(DeliveryLock);
+        Locker locker(QueueLock);
 
         // Read next target wake time
-        QueueNode* frontNode = DeliveryQueue.Peek();
+        QueueNode* frontNode = Queue.Peek();
         if (!frontNode) {
             // No data in the queue
             return;
         }
 
-        nextTimerWakeUsec = frontNode->TargetDeliveryUsec;
+        nextTimerWakeUsec = frontNode->DeliveryUsec;
 
         // If we are already waiting for an earlier (or same) time:
         if (NextTimerWakeUsec != 0 &&
@@ -210,7 +312,7 @@ void DeliveryChannel::postNextTimer()
         // Clear the next wakeup time to allow the next one to be set
         // concurrently (see above)
         {
-            std::lock_guard<std::mutex> locker(DeliveryLock);
+            Locker locker(QueueLock);
             NextTimerWakeUsec = 0;
         }
 
@@ -236,18 +338,18 @@ void DeliveryChannel::postNextTimer()
         for (;;)
         {
             {
-                std::lock_guard<std::mutex> locker(DeliveryLock);
+                Locker locker(QueueLock);
 
-                node = DeliveryQueue.Peek();
+                node = Queue.Peek();
                 if (!node) {
                     break;
                 }
 
-                if ((int64_t)(nowUsec - node->TargetDeliveryUsec) < 0) {
+                if ((int64_t)(nowUsec - node->DeliveryUsec) < 0) {
                     break;
                 }
 
-                DeliveryQueue.Pop();
+                Queue.Pop();
             }
 
             //Common->Logger.Info("Forwarding at ", node->TargetDeliveryUsec, " off by ", (int64_t)(nowUsec - node->TargetDeliveryUsec));
@@ -487,7 +589,7 @@ MauResult ProxySession::Inject(
     const void* datagram, ///< [in] Datagram buffer
     unsigned bytes) ///< [in] Datagram bytes
 {
-    std::lock_guard<std::mutex> locker(APILock);
+    Locker locker(APILock);
 
     if (Terminated) {
         return Mau_Success;
@@ -636,7 +738,7 @@ void ProxySession::workerLoop()
 
 void ProxySession::Shutdown()
 {
-    std::lock_guard<std::mutex> locker(APILock);
+    Locker locker(APILock);
 
     if (Context) {
         // Note there is no need to stop or cancel timer ticks or sockets

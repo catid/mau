@@ -41,11 +41,12 @@ namespace mau {
 #pragma pack(push, 1)
 struct QueueNode
 {
-    // Microsecond target delivery time
-    uint64_t TargetDeliveryUsec;
+    // Microsecond delivery time
+    uint64_t DeliveryUsec;
 
     // Filled in by PacketQueue:
     QueueNode* Next;
+    QueueNode* Prev;
 
     // Number of bytes of data
     uint32_t Bytes;
@@ -61,37 +62,8 @@ static const uint32_t kQueueHeaderSize = static_cast<uint32_t>(sizeof(QueueNode)
 class PacketQueue
 {
 public:
-    void Push(QueueNode* node)
-    {
-        node->Next = nullptr;
-        if (Tail)
-            Tail->Next = node;
-        else
-            Head = node;
-        Tail = node;
-    }
-
-    void InsertSorted(QueueNode* node)
-    {
-        // Insert at front or middle (based on target delivery time):
-        QueueNode* prev = nullptr;
-        for (QueueNode* next = Head; next; prev = next, next = next->Next)
-        {
-            // If we should insert before next, and after prev:
-            if (node->TargetDeliveryUsec < next->TargetDeliveryUsec)
-            {
-                if (prev)
-                    prev->Next = node;
-                else
-                    Head = node;
-                node->Next = next;
-                return;
-            }
-        }
-
-        // Insert at the back:
-        Push(node);
-    }
+    // Insert into the queue sorted by delivery time
+    void InsertSorted(QueueNode* node);
 
     QueueNode* Peek() const
     {
@@ -100,12 +72,17 @@ public:
 
     void Pop()
     {
-        if (!Head)
+        if (!Head) {
             return;
+        }
 
         Head = Head->Next;
-        if (!Head)
+        if (!Head) {
             Tail = nullptr;
+        }
+        else {
+            Head->Prev = nullptr;
+        }
     }
 
 protected:
@@ -124,18 +101,18 @@ class LockedValue
 public:
     void Set(const T& value)
     {
-        std::lock_guard<std::mutex> locker(Lock);
+        Locker locker(TheLock);
         Value = value;
     }
-    T Get()
+    T Get() const
     {
-        std::lock_guard<std::mutex> locker(Lock);
+        Locker locker(TheLock);
         return Value;
     }
 
 protected:
     /// Lock guarding value
-    std::mutex Lock;
+    mutable Lock TheLock;
 
     /// Value guarded by Lock
     T Value;
@@ -160,7 +137,7 @@ struct DeliveryCommonData
     BufferAllocator ReadBufferAllocator;
 
     /// Set to a failure code if anything goes wrong
-    std::atomic<MauResult> LastResult = Mau_Success;
+    std::atomic<MauResult> LastResult = ATOMIC_VAR_INIT(Mau_Success);
 
     /// Protected by ConfigLock. Configuration provided via Initialize()
     LockedValue<MauChannelConfig> ChannelConfig;
@@ -192,17 +169,34 @@ public:
     void Shutdown();
 
 protected:
+    /// Delivery timer
+    std::unique_ptr<asio::steady_timer> DeliveryTimer;
+
+    /// Common data
+    DeliveryCommonData* Common = nullptr;
+
     /// Delivery address
     LockedValue<UDPAddress> DeliveryAddress;
 
-    /// PacketQueue bottleneck router queue
-    PacketQueue RouterQueue;
+
+    //--------------------------------------------------------------------------
+    // Protected by QueueLock
 
     /// Lock protecting the timer setup and DeliveryQueue
-    std::mutex DeliveryLock;
+    Lock QueueLock;
 
-    /// PacketQueue (with sorting) for delivery
-    PacketQueue DeliveryQueue;
+    /// Packet queue (with sorting) for delivery: 
+    PacketQueue Queue;
+
+    /// Next time that timer is waking up
+    uint64_t NextTimerWakeUsec = 0;
+
+
+    //--------------------------------------------------------------------------
+    // Protected by InsertLock
+
+    /// Lock to serialize insertions - Does not guard members
+    Lock InsertLock;
 
     /// In a burst loss?
     bool InBurstLoss = false;
@@ -211,16 +205,7 @@ protected:
     bool InBurstReorder = false;
 
     /// Last time that an in-order packet was scheduled in microseconds
-    uint64_t NextSendUsec = 0;
-
-    /// Delivery timer
-    std::unique_ptr<asio::steady_timer> DeliveryTimer;
-
-    /// Next time that timer is waking up
-    uint64_t NextTimerWakeUsec = 0;
-
-    /// Common data
-    DeliveryCommonData* Common = nullptr;
+    uint64_t NextQueueSlotUsec = 0;
 
     /// Random number generator protected by DeliveryLock
     PCGRandom LossRNG;
@@ -267,7 +252,7 @@ protected:
     UDPAddress SourceAddress;
 
     /// Mutex to prevent API calls from being made concurrently
-    std::mutex APILock;
+    Lock APILock;
 
     /// Should worker thread be terminated?
     std::atomic<bool> Terminated = ATOMIC_VAR_INIT(false);

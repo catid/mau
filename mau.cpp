@@ -43,17 +43,21 @@ static bool ValidateMauProxyConfig(const MauProxyConfig& config)
 {
     if (!config.SendHook)
     {
-        if (config.UDPListenPort <= 0 || config.UDPListenPort >= 65536)
+        if (config.UDPListenPort <= 0 || config.UDPListenPort >= 65536) {
             return false;
+        }
 
-        if (config.UDPRecvBufferSizeBytes <= 2000)
+        if (config.UDPRecvBufferSizeBytes <= 2000) {
             return false;
-        if (config.UDPSendBufferSizeBytes <= 2000)
+        }
+        if (config.UDPSendBufferSizeBytes <= 2000) {
             return false;
+        }
     }
 
-    if (config.MaxDatagramBytes < 1)
+    if (config.MaxDatagramBytes < 1) {
         return false;
+    }
 
     return true;
 }
@@ -65,28 +69,37 @@ static bool IsWithin01(float f)
 
 static bool ValidateMauChannelConfig(const MauChannelConfig& config)
 {
-    if (!IsWithin01(config.LossRate))
+    if (!IsWithin01(config.LossRate)) {
         return false;
-    if (!IsWithin01(config.DeliveryRate))
+    }
+    if (!IsWithin01(config.DeliveryRate)) {
         return false;
+    }
 
-    if (config.Router_MBPS <= 1.f)
+    if (config.Router_MBPS <= 0.01f) {
         return false;
-    if (config.Router_QueueKB <= 1000)
+    }
+    if (config.Router_QueueMsec <= 10) {
         return false;
+    }
 
-    if (config.ReorderMaximumLatencyMsec < config.ReorderMinimumLatencyMsec)
+    if (config.ReorderMaximumLatencyMsec < config.ReorderMinimumLatencyMsec) {
         return false;
+    }
 
-    if (!IsWithin01(config.ReorderRate))
+    if (!IsWithin01(config.ReorderRate)) {
         return false;
-    if (!IsWithin01(config.OrderRate))
+    }
+    if (!IsWithin01(config.OrderRate)) {
         return false;
+    }
 
-    if (!IsWithin01(config.DuplicateRate))
+    if (!IsWithin01(config.DuplicateRate)) {
         return false;
-    if (!IsWithin01(config.CorruptionRate))
+    }
+    if (!IsWithin01(config.CorruptionRate)) {
         return false;
+    }
 
     return true;
 }
