@@ -216,14 +216,14 @@ MAU_FORCE_INLINE bool SetSocketOptionsTCP(
     asio::ip::udp::socket& socket, const char* socketTypeName)
 {
     asio::error_code error;
-    const char* operation;
+    //const char* operation;
 
-    operation = "linger";
+    //operation = "linger";
     socket.set_option(asio::socket_base::linger(false, 0), error);
     if (error)
         goto HandleFailure;
 
-    operation = "no_delay";
+    //operation = "no_delay";
     socket.set_option(asio::ip::tcp::no_delay(true), error);
     if (error)
         goto HandleFailure;

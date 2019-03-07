@@ -6,21 +6,25 @@ set(CMAKE_CONFIGURATION_TYPES "Debug;Release" CACHE STRING "" FORCE)
 set(CMAKE_CXX_STANDARD 11)
 
 set(LIB_SOURCE_FILES
-        mau.cpp
-        mau.h
-        MauProxy.cpp
-        MauProxy.h
-        MauTools.cpp
-        MauTools.h
-        Logger.cpp
-        Logger.h
-        PacketAllocator.cpp
-        PacketAllocator.h
-        )
+    mau.cpp
+    mau.h
+    MauProxy.cpp
+    MauProxy.h
+    MauTools.cpp
+    MauTools.h
+    Logger.cpp
+    Logger.h
+    PacketAllocator.cpp
+    PacketAllocator.h
+)
 
 set(UNIT_TEST_SOURCE_FILES
-        tests/UnitTest.cpp
-        )
+    tests/UnitTest.cpp
+)
+
+set(PROXY_SOURCE_FILES
+    tests/Proxy.cpp
+)
 
 if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
@@ -34,10 +38,19 @@ else()
     set(CMAKE_CXX_FLAGS_RELEASE "-O3 -march=native")
 endif()
 
-add_library(libmau STATIC ${LIB_SOURCE_FILES})
+add_library(mau STATIC ${LIB_SOURCE_FILES})
+
+include_directories(thirdparty)
 
 set(THREADS_PREFER_PTHREAD_FLAG ON)
 find_package(Threads REQUIRED)
 
 add_executable(unit_test ${UNIT_TEST_SOURCE_FILES})
-target_link_libraries(unit_test libmau Threads::Threads)
+target_link_libraries(unit_test
+    mau
+    Threads::Threads)
+
+add_executable(proxy ${PROXY_SOURCE_FILES})
+target_link_libraries(proxy
+    mau
+    Threads::Threads)
